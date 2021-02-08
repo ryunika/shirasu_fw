@@ -11,143 +11,173 @@
 #include "stm32f3xx_hal.h"
 #include <cmath>
 
+namespace md{
+
 using Float_Type = float;
 
-union E{
-	uint32_t ADCDualConvertedValue;
-	uint16_t ADCConvertedValue[2];
-};
-
 struct DataStruct{
-	Float_Type Vemf;
-	Float_Type voltage;
 	Float_Type current;
 	Float_Type velocity;
 	int32_t position_pulse;
 };
 
+enum class Mode {
+	disable,
+	duty,
+	current,
+	velocity,
+	position,
+	homing
+};
+enum class Diagnostic {
+	disable,
+	usb,
+	can
+};
+enum class Error {
+	none,
+	out_of_operating_voltage,
+	out_of_operating_temperature
+};
+enum class Cmd {
+	shutdown,
+	recover,
+	home,
+	get_status,
+	recover_current,
+	recover_velocity,
+	recover_position
+};
+
+class PI{
+public:
+	Float_Type Kp=0;
+	Float_Type Ki=0;
+	Float_Type T=1/1e3;
+	void reset()
+	{
+		e_prev = 0;
+	}
+	Float_Type update(Float_Type e)
+	{
+		Float_Type du = Kp*(e - e_prev)+Ki*T*e;
+		e_prev = e;
+		return du;
+	}
+private:
+	Float_Type e_prev;
+
+};
+
+class Motor{
+public:
+	Float_Type R;
+	Float_Type L;
+//		Float_Type inverse(Float_Type i)
+//		{
+//			Float_Type y = (L/T+R)*i - L/T*i_prev;
+//			i_prev = i;
+//			return y;
+//		}
+//	private:
+//		Float_Type i_prev=0;
+};
+
+
 class MotorCtrl {
 public:
-	enum class Mode {duty,current,velocity,position,disable};
 	void ReadConfig();
 	void WriteConfig();
-	uint32_t can_id;
-	static constexpr Float_Type T=0.0002275830678197542;//TODO:set automatically
+
+	void Init(TIM_HandleTypeDef*,ADC_HandleTypeDef*,ADC_HandleTypeDef*);
+	void UpdatePulse(int16_t pulse);
+	void UpdateCurrent(int32_t data);
+
+	Diagnostic conf_diag=Diagnostic::disable;
+	void Print();
+
+	void ControlDuty();
+	void ControlCurrent();
+	void ControlVelocity();
+	void ControlPosition();
+
+	 void ResetPosition(Float_Type offset = 0.0);
+
+	//setter
+	int8_t SetTEMP(Float_Type temp);
+	int8_t SetCPR(Float_Type cpr);
+	int8_t SetKp(Float_Type kp);
+	int8_t SetKi(Float_Type ki);
+	int8_t SetKv(Float_Type kv);
+	int8_t SetDefaultMode(Mode dm);
+	int8_t SetBID(uint32_t bid);
+	void SetMode(Mode);
+	void SetTarget(Float_Type);
+	int8_t SetVSP(Float_Type sv);
+	void SetVoltage();
+	int8_t SetHVL(Float_Type hvl);
+
+	//getter
+	Float_Type GetTEMP() const;
+	Float_Type GetCPR() const;
+	Float_Type GetKp() const;
+	Float_Type GetKi() const;
+    Float_Type GetKv() const;
+    Mode GetDefaultMode() const;
+    uint32_t GetBID() const;
+    Mode GetMode() const;
+    Float_Type GetTarget()const;
+    Float_Type GetVSP() const;
+    //TODO:GetVoltage
+    Error GetError() const;
+    Float_Type GetHVL() const;
+    Float_Type GetPOS() const;
 private:
-	using MemberFunc = void (MotorCtrl::*)(void);
-
-	class PI{
-	public:
-		Float_Type Kp;
-		Float_Type Ki;
-		void reset()
-		{
-			u = 0;
-			e_prev = 0;
-		}
-		Float_Type update(Float_Type e)
-		{
-			u += Kp*(e - e_prev)+Ki*T*e;
-			e_prev = e;
-			return u;
-		}
-	private:
-		Float_Type u;
-		Float_Type e_prev;
-
-	};
-
-	class Motor{
-	public:
-		Float_Type R;
-		Float_Type L;
-		Float_Type inverse(Float_Type i)
-		{
-			Float_Type y = (L/T+R)*i - L/T*i_prev;
-			i_prev = i;
-			return y;
-		}
-	private:
-		Float_Type i_prev=0;
-	};
-
-	class Filter{
-	public:
-		Float_Type update(Float_Type x)
-		{
-			Float_Type y = (1-a)*x + a*y_prev;
-			y_prev = y;
-			return y;
-		}
-	private:
-		static constexpr Float_Type tau = 1/100;
-		static constexpr Float_Type a = tau / (tau + T);
-		Float_Type y_prev = 0;
-	};
-
-private:
+    //Handle
 	TIM_HandleTypeDef* tim_pwm;
 	TIM_HandleTypeDef* tim_it;
-	ADC_HandleTypeDef* adc_master;
-	ADC_HandleTypeDef* adc_slave;
-	uint16_t ccr_max;
-	Mode mode=Mode::disable;
-	Float_Type target=0;
-	Float_Type voltage=0;
+	ADC_HandleTypeDef* adc_current;
+	ADC_HandleTypeDef* adc_sensor;
 
+	//Limit
+	Float_Type voltage_lim;
+	static constexpr Float_Type current_lim=40;
+	static constexpr Float_Type temperature_lim[2] = {0,75};
+	static constexpr Float_Type vsp_lim[2] = {11.4,30};
+
+	//Controller
 	PI current_controller;
 	PI velocity_controller;
 	PI position_controller;
+
+	//Mode
+	Mode mode=Mode::disable;
+	Mode default_mode;
+
+	//Current and Target value
+	DataStruct current;
+	DataStruct target;
+	Float_Type target_duty;
+	Float_Type target_voltage;
+	Float_Type supply_voltage;
+	Float_Type temperature;
+
+	//Parameters
+	static constexpr Float_Type Tc=0.001;
+	Float_Type Kh=2 * M_PI / (2000 * Tc);
+	Float_Type HomingVelocity=0;
+	uint16_t ccr_arr;
+	uint16_t ccr_max;
 	Motor motor;
-	Filter F;
+	uint32_t can_id=0x7fc;
+
+	Error error=Error::none;
 
 	void SetDuty(int d);
-
-	void ControlDisable(){};
-	void ControlDuty();
-	void ControlCurrent();
-
-
 	void Start();
 	void Stop();
-public:
-	DataStruct data;
-	Float_Type supply_voltage=20;
-	Float_Type temperature=25;
-	Float_Type target_voltage;
-	Float_Type target_current;
-	Float_Type target_velocity;
-	int32_t target_position_pulse;
-	void Init(TIM_HandleTypeDef*,ADC_HandleTypeDef*,ADC_HandleTypeDef*);
-	Mode GetMode()const;
-	void SetMode(Mode);
-	Float_Type GetTarget()const;
-	void SetTarget(Float_Type);
-	void SetVoltage(Float_Type);
-	MemberFunc Control = &MotorCtrl::ControlDisable;
-	void invoke(uint16_t* buf);
-	static constexpr uint16_t ADC_DATA_SIZE=256;
-	Float_Type Kh = 2 * M_PI / (2000 * T); // エンコーダ入力[pulse/ctrl]を[rad/s]に変換する係数．kg / Tc．
-	static constexpr Float_Type current_lim_pusled=60;
-	static constexpr Float_Type current_lim_continuous=40;
-	bool monitor = false;
-	E adc_buff[ADC_DATA_SIZE*2];
-
-	void ControlVelocity();
-	void ControlPosition();
-	uint8_t SetVSP(Float_Type vsp);
-	Float_Type GetVSP(void);
-	uint8_t SetTEMP(Float_Type temp);
-	Float_Type GetTEMP(void);
-	uint8_t SetCPR(Float_Type cpr);
-	Float_Type GetCPR(void);
-	uint8_t SetKp(Float_Type kp);
-	Float_Type GetKp(void);
-	uint8_t SetKi(Float_Type ki);
-	Float_Type GetKi(void);
-    uint8_t SetKv(Float_Type kv);
-    Float_Type GetKv(void);
 };
 
+}
 
 #endif /* SRC_MOTORCTRL_H_ */
